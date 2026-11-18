@@ -47,7 +47,7 @@ async def _drive_adjacent_selector(base_url: str, session_id: str, width: int, t
             draft = page.get_by_test_id("new-chat-landing-input")
             await expect(draft).to_be_visible(timeout=30_000)
             await expect(draft).to_have_css("font-size", "16px")
-            await expect(draft).to_have_css("line-height", "25.6px")
+            await expect(draft).to_have_css("line-height", "28.8px")
             trigger = page.get_by_test_id("new-chat-landing-agent-select")
             await trigger.click()
             harness = page.get_by_test_id("new-chat-landing-agent-ag_claude_e2e")
@@ -59,9 +59,7 @@ async def _drive_adjacent_selector(base_url: str, session_id: str, width: int, t
                 "el => getComputedStyle(el).backgroundColor"
             )
             assert hovered_background != "rgba(0, 0, 0, 0)"
-            other = page.get_by_role("menu").get_by_role(
-                "menuitem", name="Custom agents...", exact=True
-            )
+            other = page.get_by_test_id("new-chat-landing-custom-agents")
             await other.hover()
             await expect(harness_row).to_have_css("background-color", "rgba(0, 0, 0, 0)")
             await expect(other).to_have_css("background-color", hovered_background)
@@ -126,7 +124,7 @@ async def _drive_adjacent_selector(base_url: str, session_id: str, width: int, t
             await page.mouse.move(parent_box["x"] + parent_box["width"] / 2, parent_box["y"] + 2)
             await page.wait_for_timeout(500)
             await expect(models).to_be_visible()
-            await parent.get_by_role("menuitem", name="Custom agents...", exact=True).hover()
+            await other.hover()
             await page.wait_for_timeout(500)
             await expect(models).to_be_visible()
             await edit.hover()
@@ -170,7 +168,7 @@ async def _drive_adjacent_selector(base_url: str, session_id: str, width: int, t
             await trigger.click()
             await edit.click()
             await expect(models).to_be_visible()
-            await parent.get_by_role("menuitem", name="Custom agents...", exact=True).click()
+            await other.click()
             await expect(models).not_to_be_visible()
             await expect(page.get_by_role("menuitem", name="Create custom agent")).to_be_visible()
             await page.mouse.click(20, 20)

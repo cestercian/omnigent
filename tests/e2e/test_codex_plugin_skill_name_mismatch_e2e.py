@@ -44,16 +44,24 @@ from typing import Any
 import httpx
 import pytest
 
+from omnigent.host.frames import HostSkillsFrame
+from omnigent.host.skills import HostSkillDiscovery
 from omnigent.runner import create_runner_app
 from omnigent.runner.app import ResolvedSpec
-from omnigent.spec.types import SkillSpec
-from tests.e2e.test_claude_terminal_web_skills_parity_e2e import _menu_names
+from omnigent.spec.types import SkillSpec, ToolGroupsConfig
 
 _MARKETPLACE = "testmarket"
 _PLUGIN = "myplugin"
 _SKILL = "brand-review"
 _NAMESPACED = f"{_PLUGIN}:{_SKILL}"
 _SKILL_BODY_MARKER = "plugin skill body marker c7e1f4"
+
+
+def _menu_names(harness: str, workspace: Path) -> list[str]:
+    """Read the menu catalog on the host, independently of invocation."""
+    discovery = HostSkillDiscovery(lambda _: pytest.fail("No bundle expected"))
+    frame = HostSkillsFrame("menu", harness, str(workspace))
+    return [skill["name"] for skill in discovery.discover(frame, workspace)]
 
 
 @pytest.fixture(autouse=True)
@@ -126,13 +134,15 @@ class _ExecutorStub:
 
 
 class _SpecStub:
-    """Minimal ``AgentSpec`` stand-in for runner skill discovery."""
+    """Minimal ``AgentSpec`` stand-in for runner skill discovery, journal group off."""
 
     def __init__(self, harness: str) -> None:
         """:param harness: Harness id driving per-harness skill discovery."""
         self.skills: list[SkillSpec] = []
         self.skills_filter: str = "all"
         self.executor = _ExecutorStub(harness)
+        # Keeps Omnigent's own skills out of the lists these tests compare.
+        self.tool_groups = ToolGroupsConfig(journal=False)
 
 
 class _ServerClient:

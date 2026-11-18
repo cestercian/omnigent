@@ -651,6 +651,7 @@ async def two_replica_stack(
     runtime_init: None,
     db_uri: str,
     tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> AsyncIterator[_TwoReplicaStack]:
     """Model a host-sharded deployment with two replicas.
 
@@ -668,7 +669,20 @@ async def two_replica_stack(
     artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
 
     def _replica(name: str) -> FastAPI:
+        from omnigent.server.auth import UnifiedAuthProvider
+        from omnigent.server.managed_hosts import parse_sandbox_config
+        from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+
+        mode = getattr(request, "param", None)
+        authenticated = mode in ("authenticated", "managed")
         return create_app(
+            sandbox_config=parse_sandbox_config(
+                {"provider": "modal", "server_url": "http://sharded"}
+            )
+            if mode == "managed"
+            else None,
+            auth_provider=UnifiedAuthProvider(source="header") if authenticated else None,
+            permission_store=SqlAlchemyPermissionStore(db_uri) if authenticated else None,
             agent_store=SqlAlchemyAgentStore(db_uri),
             file_store=SqlAlchemyFileStore(db_uri),
             conversation_store=SqlAlchemyConversationStore(db_uri),
@@ -703,6 +717,10 @@ async def two_replica_stack(
                 conv_store=SqlAlchemyConversationStore(db_uri),
             )
     finally:
+        for app in (tunnel_replica, keyless_replica):
+            startup = getattr(app.state, "startup_inputs", None)
+            if startup is not None:
+                await startup.shutdown()
         with contextlib.suppress(Exception):
             await tunnel_replica.state.runner_router.aclose()
         with contextlib.suppress(Exception):
@@ -720,6 +738,7 @@ async def test_codex_subagent_child_routes_like_its_parent_across_replicas(
     two_replica_stack: _TwoReplicaStack,
     db_uri: str,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A hostless codex sub-agent child must classify a routing miss as its parent does.
 
@@ -813,6 +832,22 @@ async def test_codex_subagent_child_routes_like_its_parent_across_replicas(
             f"parent, not report the runner offline: {child_terminals.status_code} "
             f"{child_terminals.text}"
         )
+
+        # Bound the body so a wrongly accepted, heartbeat-only stream fails
+        # immediately instead of keeping the test connected forever.
+        from omnigent.server.routes.sessions import routes_events
+
+        async def finite_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
+            yield "data: [DONE]\n\n"
+
+        with monkeypatch.context() as patch_stream:
+            patch_stream.setattr(routes_events, "_stream_live_events", finite_stream)
+            for session_id in (parent_id, child_id):
+                stream = await stack.keyless_client.get(f"/v1/sessions/{session_id}/stream")
+                assert stream.status_code == 400, (
+                    f"misrouted stream must reject before sending SSE: {stream.status_code}"
+                )
+                assert _status_and_error_code(stream) == (400, "wrong_replica")
 
         send = await stack.keyless_client.post(
             f"/v1/sessions/{child_id}/events",

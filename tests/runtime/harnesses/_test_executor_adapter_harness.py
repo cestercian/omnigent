@@ -36,6 +36,7 @@ from omnigent.inner.executor import (
     ExecutorEvent,
     Message,
     MockExecutor,
+    NativeTurnAcceptance,
     ToolCallComplete,
     ToolCallRequest,
     ToolCallStatus,
@@ -43,6 +44,7 @@ from omnigent.inner.executor import (
     TurnCancelled,
     TurnComplete,
 )
+from omnigent.inner.model_auth import ProviderAuthRequired
 from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
 _SCRIPT_ENV_VAR = "MOCK_EXECUTOR_SCRIPT"
@@ -83,6 +85,30 @@ class _CapturingExecutor(Executor):
         del session_key
 
 
+class _ProviderAuthFailureExecutor(Executor):
+    """Raise the trusted signer preflight failure at the executor boundary."""
+
+    async def run_turn(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        system_prompt: str,
+        config: ExecutorConfig | None = None,
+    ) -> AsyncIterator[ExecutorEvent]:
+        del messages, tools, system_prompt, config
+        if False:
+            yield TurnComplete(response=None)
+        raise ProviderAuthRequired.for_authority(
+            "https://workspace.cloud.databricks.com", "agent-profile"
+        )
+
+    async def close(self) -> None:
+        pass
+
+    async def close_session(self, session_key: str) -> None:
+        del session_key
+
+
 def _build_text_only() -> Executor:
     """
     MockExecutor scripted with a single text-only TurnComplete.
@@ -90,7 +116,17 @@ def _build_text_only() -> Executor:
     :returns: A configured :class:`MockExecutor` instance.
     """
     executor = MockExecutor()
-    executor.enqueue_response("hello from mock")
+    raw_acceptance = os.environ.get("MOCK_EXECUTOR_NATIVE_ACCEPTANCE")
+    executor.enqueue_events(
+        [
+            TurnComplete(
+                response="hello from mock",
+                native_acceptance=NativeTurnAcceptance(**json.loads(raw_acceptance))
+                if raw_acceptance
+                else None,
+            )
+        ]
+    )
     return executor
 
 
@@ -183,12 +219,20 @@ def _build_cancelled() -> Executor:
     MockExecutor scripted with a provider-side :class:`TurnCancelled`.
 
     The adapter should map this cleanly to ``response.cancelled`` rather than
-    falling through to ``response.completed``.
+    falling through to ``response.completed``, with the usage of the model
+    calls the turn made before it was cancelled.
 
     :returns: A configured :class:`MockExecutor` instance.
     """
     executor = MockExecutor()
-    executor._turns.append([TurnCancelled(reason="provider_cancelled")])
+    executor._turns.append(
+        [
+            TurnCancelled(
+                reason="provider_cancelled",
+                usage={"input_tokens": 300, "output_tokens": 40, "total_tokens": 340},
+            )
+        ]
+    )
     return executor
 
 
@@ -224,6 +268,10 @@ def _build_pr_tracking() -> Executor:
     return executor
 
 
+def _build_provider_auth_failure() -> Executor:
+    return _ProviderAuthFailureExecutor()
+
+
 _SCRIPTS: dict[str, Callable[[], Executor]] = {
     "pr_tracking": _build_pr_tracking,
     "text_only": _build_text_only,
@@ -232,6 +280,7 @@ _SCRIPTS: dict[str, Callable[[], Executor]] = {
     "error_with_usage": _build_error_with_usage,
     "cancelled": _build_cancelled,
     "capture_messages": _build_capture_messages,
+    "provider_auth_failure": _build_provider_auth_failure,
 }
 
 

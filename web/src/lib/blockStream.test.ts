@@ -74,6 +74,35 @@ describe("BlockStream — response_start", () => {
 });
 
 describe("BlockStream — block ctx carries response_id and item_id", () => {
+  it("does not adopt lifecycle notice ids as the parent stream identity", () => {
+    const blocks = reduce([
+      {
+        type: "native_tool_call",
+        toolType: "subagent_activity",
+        data: {},
+        itemId: "notice_1",
+        responseId: "subagent_returned",
+      },
+      { type: "text_delta", delta: "Before identity\n" },
+      {
+        type: "tool_call",
+        name: "Read",
+        arguments: {},
+        callId: "call_1",
+        status: "completed",
+        agentName: "parent",
+        itemId: "tool_1",
+        responseId: "parent_turn",
+      },
+      { type: "text_delta", delta: "After identity\n" },
+    ]);
+
+    expect(blocks[0]?.ctx.responseId).toBe("subagent_returned");
+    expect(
+      blocks.filter((block) => block.type === "text_chunk").map((block) => block.ctx.responseId),
+    ).toEqual(["", "parent_turn"]);
+  });
+
   it("every block ctx.responseId is the active response id from response.created", () => {
     const blocks = reduce([
       { type: "response_created", response: makeResponse({ responseId: "resp_xyz" }) },
@@ -292,6 +321,33 @@ describe("BlockStream — text", () => {
     expect(textDone.ctx.itemId).toBe("msg_terminal_1");
     expect(textDone.ctx.responseId).toBe("resp_terminal_1");
     expect(textDone.fullText).toBe("Hello from transcript");
+  });
+
+  it("message_done phase lands on the text_done it closes or emits", () => {
+    const streamed = reduce([
+      { type: "response_created", response: makeResponse({ responseId: "resp_1" }) },
+      { type: "text_delta", delta: "Checking." },
+      {
+        type: "message_done",
+        content: [],
+        itemId: "msg_1",
+        responseId: "resp_1",
+        phase: "commentary",
+      },
+    ]);
+    const closed = streamed.find((b): b is TextDone => b.type === "text_done");
+    expect(closed?.phase).toBe("commentary");
+
+    const [emitted] = reduce([
+      {
+        type: "message_done",
+        content: [{ type: "output_text", text: "Done." }],
+        itemId: "msg_2",
+        responseId: "resp_2",
+        phase: "final_answer",
+      },
+    ]);
+    expect((emitted as TextDone).phase).toBe("final_answer");
   });
 
   it("simple text response → start, text, done, end", () => {
@@ -774,12 +830,16 @@ describe("BlockStream — multi-response (session-lifetime reducer)", () => {
         content: [{ type: "output_text", text: "Hi! 👋" }],
         itemId: "msg_X",
         responseId: "resp_X",
+        phase: "commentary",
       },
     ]);
 
     const textDones = blocks.filter((b): b is TextDone => b.type === "text_done");
     expect(textDones).toHaveLength(1);
     expect(textDones[0]!.fullText).toBe("Hi! 👋");
+    // The deduped message keeps its identity, so live and reloaded folds agree.
+    expect(textDones[0]!.ctx.itemId).toBe("msg_X");
+    expect(textDones[0]!.phase).toBe("commentary");
   });
 
   it("response_in_progress sets the responseId when response.created is absent", () => {
@@ -1791,6 +1851,46 @@ describe("BlockStream — elicitation", () => {
       reason: "Run a focused test",
       execPolicyAmendment: [".venv/bin/python", "-m", "pytest"],
     });
+  });
+
+  it("marks only a card the server sends with is_blocking=false as non-blocking", () => {
+    const blockFor = (extra: Record<string, unknown>) => {
+      const event = parseEvent("response.elicitation_request", {
+        elicitation_id: "elic_async",
+        params: {
+          mode: "form",
+          message: "Codex needs input",
+          phase: "codex_request_user_input",
+          policy_name: "codex_native_request_user_input",
+          ...extra,
+        },
+      });
+      if (event === null) throw new Error("expected an elicitation request");
+      const card = reduce([event]).find((b): b is ElicitationBlock => b.type === "elicitation");
+      if (card === undefined) throw new Error("expected an elicitation card");
+      return card;
+    };
+
+    expect(blockFor({ is_blocking: false }).isBlocking).toBe(false);
+    expect(blockFor({})).not.toHaveProperty("isBlocking");
+    expect(blockFor({ is_blocking: true })).not.toHaveProperty("isBlocking");
+  });
+
+  it("keeps the task a workflow question is about on its card", () => {
+    const card = (params: Record<string, unknown>) => {
+      const event = parseEvent("response.elicitation_request", {
+        elicitation_id: "elicit_journal_1",
+        params: { mode: "form", message: "Waiting for you on Deploy", ...params },
+      });
+      if (event === null) throw new Error("expected an elicitation request");
+      return reduce([event]).find((b): b is ElicitationBlock => b.type === "elicitation");
+    };
+
+    expect(card({ phase: "workflow_request_input", journal_step: "deploy" })).toMatchObject({
+      phase: "workflow_request_input",
+      journalStep: "deploy",
+    });
+    expect(card({ phase: "workflow_request_input" })).not.toHaveProperty("journalStep");
   });
 
   it("flushes pending text before an elicitation prompt", () => {

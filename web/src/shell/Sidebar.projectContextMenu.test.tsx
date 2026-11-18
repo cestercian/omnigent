@@ -1,11 +1,10 @@
+import { EXPANDED_PROJECT_SECTIONS_STORAGE_KEY } from "@/shell/sidebarNav";
+import { conversationPage } from "@/test/sidebarMockHelpers";
+import { renderSidebar } from "@/test/sidebarTestHelpers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/hooks/useScopeCache", () => import("@/test/mockScopeCache"));
-import { SidebarDataProvider } from "@/hooks/useSidebarData";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 
 const PROJECT_NAME = "Sprint 42";
 const PROJECT_ID = "p_sprint42";
@@ -29,53 +28,32 @@ vi.mock("@/hooks/useHosts", () => ({
   useHosts: () => ({ data: [] }),
 }));
 
-vi.mock("@/hooks/useConversations", () => ({
-  useConversations: vi.fn(),
-  useLeaveSession: () => ({ mutate: vi.fn(), isPending: false }),
-  useArchiveConversation: () => ({ mutate: vi.fn() }),
-  useBulkArchiveConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  useBulkDeleteConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  useBulkMoveToProject: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  usePinnedConversations: () => ({
-    data: { conversations: [], filterHonored: true },
-    isSuccess: true,
-  }),
-  useTogglePinnedConversation: () => ({ mutate: vi.fn() }),
-  setConversationPinned: vi.fn(() => Promise.resolve({})),
-  PINNED_CONVERSATIONS_KEY: ["pinned-conversations"],
-  useRenameConversation: () => ({ mutate: vi.fn() }),
-  useStopAndDeleteConversation: () => ({
-    mutate: vi.fn(),
-    reset: vi.fn(),
-    isPending: false,
-    isError: false,
-    variables: undefined,
-  }),
-  useStopSession: () => ({ mutate: vi.fn() }),
-  useProjects: () => ({ data: [{ id: PROJECT_ID, name: PROJECT_NAME }] }),
-  useProjectSessions: () => ({
-    data: undefined,
-    isLoading: false,
-    isError: false,
-    error: null,
-    fetchNextPage: vi.fn(),
-    hasNextPage: false,
-    isFetchingNextPage: false,
-  }),
-  useMoveToProject: () => ({ mutate: vi.fn() }),
-  useDeleteProject: () => mocks.deleteProject,
-  useRenameProject: () => mocks.renameProject,
-  useCreateProject: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  useProjectConfig: () => ({ data: {}, isLoading: false, isError: false }),
-  useUpdateProjectConfig: () => ({
-    mutate: vi.fn(),
-    mutateAsync: vi.fn(() => Promise.resolve()),
-    isPending: false,
-    isError: false,
-    error: null,
-  }),
-  PROJECT_LABEL_KEY: "omni_project",
-}));
+vi.mock("@/hooks/useConversations", async () => {
+  const { conversationHooksMock } = await import("@/test/sidebarMockHelpers");
+  return {
+    ...conversationHooksMock(),
+    useProjects: () => ({ data: [{ id: PROJECT_ID, name: PROJECT_NAME }] }),
+    useProjectSessions: () => ({
+      data: undefined,
+      isLoading: false,
+      isError: false,
+      error: null,
+      fetchNextPage: vi.fn(),
+      hasNextPage: false,
+      isFetchingNextPage: false,
+    }),
+    useDeleteProject: () => mocks.deleteProject,
+    useRenameProject: () => mocks.renameProject,
+    useProjectConfig: () => ({ data: {}, isLoading: false, isError: false }),
+    useUpdateProjectConfig: () => ({
+      mutate: vi.fn(),
+      mutateAsync: vi.fn(() => Promise.resolve()),
+      isPending: false,
+      isError: false,
+      error: null,
+    }),
+  };
+});
 
 vi.mock("./ProjectSettingsDialog", () => ({
   ProjectSettingsDialog: ({ open }: { open: boolean }) =>
@@ -84,7 +62,6 @@ vi.mock("./ProjectSettingsDialog", () => ({
 vi.mock("@/components/PermissionsModal", () => ({ PermissionsModal: () => null }));
 
 import { type Conversation, useConversations } from "@/hooks/useConversations";
-import { Sidebar } from "./Sidebar";
 
 const useConversationsMock = vi.mocked(useConversations);
 
@@ -101,41 +78,8 @@ const FILED_CONVERSATION: Conversation = {
 };
 
 function mockConversations(conversations: Conversation[]) {
-  const result = {
-    data: {
-      pages: [
-        {
-          data: conversations,
-          first_id: conversations[0]?.id ?? null,
-          last_id: conversations.at(-1)?.id ?? null,
-          has_more: false,
-        },
-      ],
-      pageParams: [undefined],
-    },
-    isLoading: false,
-    isError: false,
-    error: null,
-    fetchNextPage: vi.fn(),
-    hasNextPage: false,
-    isFetchingNextPage: false,
-  } as unknown as ReturnType<typeof useConversations>;
+  const result = conversationPage(conversations);
   useConversationsMock.mockImplementation(() => result);
-}
-
-function renderSidebar() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
-    <QueryClientProvider client={client}>
-      <SidebarDataProvider>
-        <TooltipProvider>
-          <MemoryRouter initialEntries={["/"]}>
-            <Sidebar open onClose={vi.fn()} />
-          </MemoryRouter>
-        </TooltipProvider>
-      </SidebarDataProvider>
-    </QueryClientProvider>,
-  );
 }
 
 function folderHeader(): HTMLElement {
@@ -227,6 +171,18 @@ describe("project folder header context menu", () => {
     expect(screen.getByTestId("rename-project-confirm")).toBeInTheDocument();
   });
 
+  it("focuses and selects the project name when the rename dialog opens", async () => {
+    renderSidebar();
+
+    fireEvent.contextMenu(folderHeader());
+    fireEvent.click(screen.getByTestId("rename-project"));
+
+    const input = screen.getByDisplayValue(PROJECT_NAME) as HTMLInputElement;
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(PROJECT_NAME.length);
+  });
+
   it("drives Rename into the shared dialog and mutation", async () => {
     renderSidebar();
 
@@ -243,6 +199,24 @@ describe("project folder header context menu", () => {
         oldName: PROJECT_NAME,
         newName: "Sprint 43",
       }),
+    );
+  });
+
+  it("keeps an expanded folder expanded under its new name", async () => {
+    localStorage.setItem(EXPANDED_PROJECT_SECTIONS_STORAGE_KEY, JSON.stringify([PROJECT_NAME]));
+    renderSidebar();
+
+    fireEvent.contextMenu(folderHeader());
+    fireEvent.click(screen.getByTestId("rename-project"));
+    fireEvent.change(screen.getByDisplayValue(PROJECT_NAME), {
+      target: { value: "Sprint 43" },
+    });
+    fireEvent.click(screen.getByTestId("rename-project-confirm"));
+
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(EXPANDED_PROJECT_SECTIONS_STORAGE_KEY)!)).toEqual([
+        "Sprint 43",
+      ]),
     );
   });
 
@@ -263,6 +237,74 @@ describe("project folder header context menu", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
 
     expect(mocks.deleteProject.mutate).toHaveBeenCalledWith(
+      { id: PROJECT_ID, name: PROJECT_NAME },
+      expect.anything(),
+    );
+  });
+
+  it("asks again before Delete stops sessions whose agents are working", () => {
+    interface DeleteCallbacks {
+      onSuccess?: (result: unknown) => void;
+    }
+    mocks.deleteProject.mutate.mockImplementationOnce((_vars: unknown, opts: DeleteCallbacks) =>
+      opts.onSuccess?.({ status: "needs_running_confirmation", runningCount: 2 }),
+    );
+    renderSidebar();
+
+    fireEvent.contextMenu(folderHeader());
+    fireEvent.click(screen.getByTestId("delete-project"));
+    fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+
+    expect(screen.getByTestId("delete-project-running-warning")).toHaveTextContent(
+      `2 sessions in ${PROJECT_NAME} have agents still working.`,
+    );
+    expect(mocks.deleteProject.mutate).toHaveBeenLastCalledWith(
+      { id: PROJECT_ID, name: PROJECT_NAME },
+      expect.anything(),
+    );
+
+    mocks.deleteProject.mutate.mockImplementationOnce((_vars: unknown, opts: DeleteCallbacks) =>
+      opts.onSuccess?.({ status: "deleted", succeeded: [], failed: [] }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete anyway" }));
+
+    expect(mocks.deleteProject.mutate).toHaveBeenLastCalledWith(
+      { id: PROJECT_ID, name: PROJECT_NAME, stopRunning: true },
+      expect.anything(),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    // Reopening starts from the plain confirmation, not the earlier warning.
+    fireEvent.contextMenu(folderHeader());
+    fireEvent.click(screen.getByTestId("delete-project"));
+    expect(screen.queryByTestId("delete-project-running-warning")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete project" })).toBeInTheDocument();
+  });
+
+  it("drops the working-agent warning when Delete is cancelled and reopened", () => {
+    mocks.deleteProject.mutate.mockImplementationOnce(
+      (_vars: unknown, opts: { onSuccess?: (result: unknown) => void }) =>
+        opts.onSuccess?.({ status: "needs_running_confirmation", runningCount: 1 }),
+    );
+    renderSidebar();
+
+    fireEvent.contextMenu(folderHeader());
+    fireEvent.click(screen.getByTestId("delete-project"));
+    fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+    expect(screen.getByTestId("delete-project-running-warning")).toHaveTextContent(
+      `1 session in ${PROJECT_NAME} has an agent still working.`,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    fireEvent.contextMenu(folderHeader());
+    fireEvent.click(screen.getByTestId("delete-project"));
+    expect(screen.queryByTestId("delete-project-running-warning")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+
+    expect(mocks.deleteProject.mutate).toHaveBeenCalledTimes(2);
+    expect(mocks.deleteProject.mutate).toHaveBeenLastCalledWith(
       { id: PROJECT_ID, name: PROJECT_NAME },
       expect.anything(),
     );
@@ -383,9 +425,13 @@ describe("project folder header context menu", () => {
     expect(screen.getByTestId("rename-project")).toBeInTheDocument();
   });
 
-  it("toggles on the first keyboard activation after dismissal", async () => {
+  it("restores keyboard focus on dismissal after a previous menu opened a dialog", async () => {
     renderSidebar();
     const header = folderHeader();
+    fireEvent.contextMenu(header);
+    fireEvent.click(screen.getByTestId("rename-project"));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     header.focus();
 
     fireEvent.contextMenu(header, { detail: 0 });

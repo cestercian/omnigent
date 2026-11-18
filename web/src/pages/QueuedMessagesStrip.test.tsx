@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QueuedMessage } from "@/store/chatStore";
-import { QueuedMessagesStrip, queuedMessageCollisionDetection } from "./QueuedMessagesStrip";
+import {
+  QueuedMessagesStrip,
+  queuedMessageCollisionDetection,
+  restrictToQueuedList,
+} from "./QueuedMessagesStrip";
 
 const msg = (queueId: string, text: string): QueuedMessage => ({
   queueId,
@@ -15,9 +19,55 @@ const msg = (queueId: string, text: string): QueuedMessage => ({
   conversationId: "conv_abc",
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("QueuedMessagesStrip", () => {
+  it.each([
+    ["attachment only, named", "", "Screenshot 2026-09-18 at 11.49.24 AM.png"],
+    ["attachment only, unnamed", "", ""],
+    ["short text, named", "Hey", "Screenshot 2026-09-18 at 11.49.24 AM.png"],
+    ["short text, unnamed", "Hey", ""],
+    [
+      "long text, named",
+      "Compare these screenshots. ".repeat(30).trim(),
+      "Screenshot 2026-09-18 at 11.49.24 AM.png",
+    ],
+    ["long text, unnamed", "Compare these screenshots. ".repeat(30).trim(), ""],
+  ])("owns the queued attachment row contract: %s", (_case, text, filename) => {
+    const filenames = [filename, "after.png", "notes.txt"];
+    const expectedNames = [filename || "image.png", "after.png", "notes.txt"];
+    render(
+      <QueuedMessagesStrip
+        messages={[
+          {
+            ...msg("q_1", text),
+            files: filenames.map(
+              (name, index) => new File([], name, { type: index < 2 ? "image/png" : "text/plain" }),
+            ),
+          },
+        ]}
+        onDelete={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+
+    const chip = screen.getByTestId("queued-message-attachments");
+    expect(chip).toHaveAttribute("title", expectedNames.join("\n"));
+    expect(screen.getByText(expectedNames[0]!)).toHaveClass("min-w-6", "truncate");
+    expect(screen.getByText("+2")).toBeInTheDocument();
+    if (text) {
+      const preview = screen.getByText(text);
+      expect(preview).toHaveClass("truncate");
+      expect(preview).toHaveAttribute("title", text);
+      expect(preview.parentElement).toBe(chip.parentElement);
+    } else {
+      expect(chip.parentElement?.children).toHaveLength(1);
+    }
+  });
+
   it("renders nothing when the queue is empty", () => {
     const { container } = render(
       <QueuedMessagesStrip messages={[]} onDelete={vi.fn()} onEdit={vi.fn()} />,
@@ -218,6 +268,32 @@ describe("QueuedMessagesStrip", () => {
     expect(onSteer).toHaveBeenCalledWith("q_2");
   });
 
+  it("disables send-now on every row while a message waits for its host", () => {
+    const onSteer = vi.fn();
+    render(
+      <TooltipProvider>
+        <QueuedMessagesStrip
+          messages={[
+            msg("q_1", "before"),
+            { ...msg("q_2", "held"), waitingForHost: true },
+            msg("q_3", "after"),
+          ]}
+          onDelete={vi.fn()}
+          onEdit={vi.fn()}
+          onSteer={onSteer}
+        />
+      </TooltipProvider>,
+    );
+    const [before, held, after] = screen.getAllByRole("button", {
+      name: "Send queued message now",
+    });
+    expect(before).toBeDisabled();
+    expect(held).toBeDisabled();
+    expect(after).toBeDisabled();
+    fireEvent.click(before!);
+    expect(onSteer).not.toHaveBeenCalled();
+  });
+
   it("marks failed messages and offers an explicit retry", () => {
     const onSteer = vi.fn();
     render(
@@ -308,6 +384,21 @@ describe("QueuedMessagesStrip", () => {
     expect(queuedMessageCollisionDetection(args)).toEqual([]);
   });
 
+  it("keeps the dragged row vertical and inside the queued list", () => {
+    const box = (top: number, bottom: number) =>
+      ({ top, bottom, left: 0, right: 300, width: 300, height: bottom - top }) as const;
+    const restrict = (y: number) =>
+      restrictToQueuedList({
+        transform: { x: 30, y, scaleX: 1, scaleY: 1 },
+        draggingNodeRect: box(48, 92),
+        scrollableAncestorRects: [box(0, 128)],
+      } as unknown as Parameters<typeof restrictToQueuedList>[0]);
+
+    expect(restrict(-20)).toMatchObject({ x: 0, y: -20 });
+    expect(restrict(-80)).toMatchObject({ x: 0, y: -48 });
+    expect(restrict(80)).toMatchObject({ x: 0, y: 36 });
+  });
+
   it("calls onReorder after moving a queued message with the keyboard", async () => {
     const onReorder = vi.fn();
     render(
@@ -339,6 +430,11 @@ describe("QueuedMessagesStrip", () => {
     handles.forEach((handle, index) =>
       vi.spyOn(handle, "getBoundingClientRect").mockReturnValue(rect(index * 32, 24)),
     );
+    vi.spyOn(screen.getByRole("list"), "getBoundingClientRect").mockReturnValue({
+      ...rect(0, 300),
+      bottom: 96,
+      height: 96,
+    });
 
     const handle = handles[0]!;
     handle.focus();
@@ -348,6 +444,61 @@ describe("QueuedMessagesStrip", () => {
     fireEvent.keyDown(handle, { key: " ", code: "Space" });
 
     await waitFor(() => expect(onReorder).toHaveBeenCalledWith("q_1", "q_3"));
+  });
+
+  it("reorders on a touch long-press drag and keeps WebKit's long-press UI off the rows", async () => {
+    const onReorder = vi.fn();
+    render(
+      <QueuedMessagesStrip
+        messages={[msg("q_1", "first"), msg("q_2", "second")]}
+        onDelete={vi.fn()}
+        onEdit={vi.fn()}
+        onReorder={onReorder}
+      />,
+    );
+    const rows = screen.getAllByRole("listitem");
+    const handles = screen.getAllByRole("button", { name: "Reorder queued message" });
+    for (const row of rows) {
+      expect(row).toHaveClass("select-none", "[-webkit-touch-callout:none]");
+    }
+    const rect = (top: number) =>
+      ({
+        x: 0,
+        y: top,
+        top,
+        right: 300,
+        bottom: top + 44,
+        left: 0,
+        width: 300,
+        height: 44,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    rows.forEach((row, index) =>
+      vi.spyOn(row, "getBoundingClientRect").mockReturnValue(rect(index * 48)),
+    );
+    const list = screen.getByRole("list");
+    // jsdom doesn't load Tailwind, so give the list its scroll overflow inline.
+    list.style.overflowY = "auto";
+    vi.spyOn(list, "getBoundingClientRect").mockReturnValue({
+      ...rect(0),
+      bottom: 100,
+      height: 100,
+    });
+
+    const touch = (y: number) => ({ clientX: 20, clientY: y });
+    fireEvent.touchStart(handles[1]!, { touches: [touch(70)] });
+    // Hold past the TouchSensor's 250ms delay before moving.
+    await waitFor(() => expect(handles[1]).toHaveAttribute("aria-pressed", "true"), {
+      timeout: 1000,
+    });
+    fireEvent.touchMove(handles[1]!, { touches: [touch(40)] });
+    fireEvent.touchMove(handles[1]!, { touches: [touch(20)] });
+    // The row follows the finger up but stops at the list's top edge (-48px).
+    await waitFor(() => expect(rows[1]!.style.transform).toBe("translate3d(0, -48px, 0)"));
+    fireEvent.touchEnd(handles[1]!, { changedTouches: [touch(20)] });
+
+    await waitFor(() => expect(onReorder).toHaveBeenCalledWith("q_2", "q_1"));
+    expect(rows[1]!.style.transform).toBe("");
   });
 
   it("caps and scrolls a long backlog instead of growing the composer stack", () => {
@@ -364,4 +515,45 @@ describe("QueuedMessagesStrip", () => {
       "overscroll-contain",
     );
   });
+
+  it("shows the ↑ chord on the edit tooltip of the row an empty composer recalls", async () => {
+    const queue = [msg("q_1", "first"), msg("q_2", "second")];
+    const { unmount } = render(
+      <QueuedMessagesStrip
+        messages={queue}
+        onDelete={vi.fn()}
+        onEdit={vi.fn()}
+        arrowUpRecallQueueId="q_2"
+      />,
+    );
+    fireEvent.pointerMove(screen.getAllByRole("button", { name: "Edit queued message" })[1]!, {
+      pointerType: "mouse",
+    });
+    const recallTooltip = await screen.findByRole("tooltip");
+    expect(recallTooltip).toHaveTextContent("Edit queued message");
+    expect(tooltipKeys(recallTooltip)).toEqual(["↑"]);
+    unmount();
+
+    render(
+      <QueuedMessagesStrip
+        messages={queue}
+        onDelete={vi.fn()}
+        onEdit={vi.fn()}
+        arrowUpRecallQueueId="q_2"
+      />,
+    );
+    fireEvent.pointerMove(screen.getAllByRole("button", { name: "Edit queued message" })[0]!, {
+      pointerType: "mouse",
+    });
+    const plainTooltip = await screen.findByRole("tooltip");
+    expect(plainTooltip).toHaveTextContent("Edit queued message");
+    expect(tooltipKeys(plainTooltip)).toEqual([]);
+  });
 });
+
+/** The chord chips inside a tooltip, in display order. */
+function tooltipKeys(tooltip: HTMLElement): string[] {
+  return Array.from(tooltip.querySelectorAll('[data-slot="kbd"]')).map(
+    (key) => key.textContent ?? "",
+  );
+}
